@@ -1,0 +1,883 @@
+// ==UserScript==
+// @name         Tabby Finanace Application
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Bulk process and send invoices in Wafeq with enhanced UI and filtering
+// @author       Your Name
+// @match        https://app.wafeq.com/c/1624/invoicing*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=wafeq.com
+// @grant        none
+// ==/UserScript==
+
+console.log('🔍 Tabby Finance Application: started');
+
+// Clear the close flag on any page refresh in this tab
+window.addEventListener('load', () => {
+  console.log('🔍 Tabby Finance Application: Page loaded');
+  sessionStorage.removeItem('wafeqToolClosed');
+});
+
+(function() {
+  console.log('🔍 Tabby Finance Application: Main function started');
+
+  function injectTool() {
+    // Prevent duplicate injection or respect close flag
+    if (document.getElementById('hot-chili-panel')) {
+      return;
+    }
+    if (sessionStorage.getItem('wafeqToolClosed') === '1') {
+      return;
+    }
+    
+    // ===== Auto-fetch CSRF Token =====
+    const tokenFromMeta = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
+    const tokenFromCookie = document.cookie.split('; ').find(row => row.startsWith('csrftoken='))?.split('=')[1];
+    const csrfToken = tokenFromMeta || tokenFromCookie || null;
+
+    if (!csrfToken || csrfToken === 'undefined') {
+      console.warn('❌ CSRF Token not found or undefined.');
+      // You can optionally stop the script here if you want:
+      // throw new Error('CSRF Token missing. Cannot proceed.');
+    }
+    // ===== End of CSRF Token block =====
+
+    const style = document.createElement("style");
+    style.textContent = `
+      @keyframes slideInRight {
+        from { transform: translateX(100%); opacity: 0; }
+        to { transform: translateX(0); opacity: 1; }
+      }
+
+      #hot-chili-panel {
+        animation: slideInRight 0.4s ease-out;
+        cursor: grab;
+        background: linear-gradient(135deg, #3FF0B0 0%, #14D3FF 100%) !important;
+      }
+
+      #hc-run:hover {
+        background-color: #1a1a1a !important;
+        transform: scale(1.03);
+        transition: background-color 0.3s ease, transform 0.2s ease;
+      }
+
+      #hc-due::placeholder,
+      #hc-min-amount::placeholder,
+      #hc-max-amount::placeholder {
+        color: #131C26 !important;
+        opacity: 1 !important;
+      }
+
+      .switch {
+        position: relative;
+        display: inline-block;
+        width: 40px;
+        height: 22px;
+      }
+
+      .switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: #999;
+        transition: 0.4s;
+        border-radius: 34px;
+      }
+
+      .slider:before {
+        position: absolute;
+        content: "";
+        height: 16px;
+        width: 16px;
+        left: 3px;
+        bottom: 3px;
+        background-color: white;
+        transition: 0.4s;
+        border-radius: 50%;
+      }
+
+      input:checked + .slider {
+        background: linear-gradient(135deg, #3BFFD9, #3BFFC8);
+      }
+
+      input:checked + .slider:before {
+        transform: translateX(18px);
+      }
+      
+      .progress-bar {
+        width: 100%;
+        height: 10px;
+        background-color: #f0f0f0;
+        border-radius: 5px;
+        margin: 10px 0;
+        overflow: hidden;
+        display: none;
+      }
+      
+      .progress-bar-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #3FF0B0, #14D3FF);
+        width: 0%;
+        transition: width 0.3s ease;
+      }
+      
+      .stats-badge {
+        display: inline-block;
+        padding: 3px 8px;
+        border-radius: 12px;
+        font-size: 12px;
+        font-weight: 600;
+        margin-right: 5px;
+        background: rgba(255,255,255,0.25);
+      }
+
+      .amount-badge {
+        background: rgba(255,255,255,0.35);
+        font-weight: 700;
+        color: #131C26;
+      }
+      
+      .results-panel {
+        margin-top: 10px;
+        padding: 8px;
+        background: rgba(255,255,255,0.15);
+        border-radius: 12px;
+        font-size: 12px;
+        display: none;
+      }
+
+      .invoice-list-container {
+        max-height: 150px;
+        overflow-y: auto;
+        margin: 8px 0;
+        padding-right: 8px;
+        border-radius: 8px;
+      }
+
+      .invoice-list-container::-webkit-scrollbar {
+        width: 8px;
+      }
+
+      .invoice-list-container::-webkit-scrollbar-track {
+        background: rgba(255,255,255,0.1);
+        border-radius: 4px;
+      }
+
+      .invoice-list-container::-webkit-scrollbar-thumb {
+        background: rgba(255,255,255,0.3);
+        border-radius: 4px;
+      }
+
+      .invoice-list-container::-webkit-scrollbar-thumb:hover {
+        background: rgba(255,255,255,0.4);
+      }
+
+      .invoice-item {
+        padding: 4px 0;
+        border-bottom: 1px solid rgba(255,255,255,0.1);
+      }
+
+      .invoice-item:last-child {
+        border-bottom: none;
+      }
+
+        #hc-contact-suggestions-list {
+          background: white;
+          border: 1px solid #ccc;
+          border-radius: 0 0 12px 12px;
+          max-height: 160px;
+          overflow-y: auto;
+          position: absolute;
+          width: 100%;
+          left: 0;
+          top: 100%;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+          font-size: 14px;
+        }
+        .hc-contact-suggestion {
+          padding: 8px;
+          cursor: pointer;
+        }
+        .hc-contact-suggestion:hover {
+          background: #f0f0f0;
+        }
+    `;
+    document.head.appendChild(style);
+
+    const wrapper = document.createElement("div");
+      wrapper.innerHTML = `<div id="hot-chili-panel" style="position:fixed;top:20px;right:20px;z-index:9999;padding:20px;border-radius:20px;box-shadow:0 4px 12px rgba(0,0,0,0.15);font-family:Inter, Arial, -apple-system, system-ui;width:480px;max-width:98vw;font-size:14px;color:#131C26;background:linear-gradient(135deg, #3FF0B0 0%, #14D3FF 100%) !important;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+      <svg viewBox="0 0 130 40" width="126" height="40" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+        <path d="M125.49 7.88041L117.042 40.0008H110.615L112.717 32.0977H106.844L100.54 7.90098H107.419L112.882 31.5216L119.042 7.90098V7.88041H125.49ZM18.0709 11.3165V6.72818L4.59987 8.78573C8.39887 7.98329 10.5756 4.93811 10.5756 1.89294V0H3.75793V8.90918L0 9.50587V14.0942L3.75793 13.5181V15.6579L0.0205351 16.2341V20.6166L3.75793 20.0405V25.3078C3.98382 29.8962 7.00248 32.6327 11.9514 32.6327C13.7175 32.6327 15.4835 32.2623 17.1058 31.5628L17.1468 31.5422V25.8016L17.0647 25.8428C16.0995 26.316 15.0317 26.5629 13.9639 26.5629C11.664 26.5629 10.206 26.1926 10.206 24.3202V19.0323L18.0915 17.8184V13.4358L10.206 14.6497V12.5099L18.0709 11.3165ZM38.3596 8.95033L44.8077 7.96271V32.1389H38.3596V24.4437C38.1132 29.567 34.9303 32.6121 29.7349 32.6121C26.7573 32.6121 24.2931 31.4599 22.6297 29.2789C20.9664 27.0979 20.0834 23.9087 20.0834 20.0199C20.0834 16.1312 20.9664 12.942 22.6297 10.761C24.2931 8.57997 26.7573 7.42775 29.7349 7.42775C34.9303 7.42775 38.1132 10.4523 38.3596 15.5551V8.95033ZM38.7087 20.0199C38.7087 17.8184 38.1543 15.946 37.107 14.6086C36.0392 13.2506 34.499 12.5305 32.6714 12.5305C28.8929 12.5305 26.6341 15.3287 26.6341 20.0199C26.6341 24.7111 28.8929 27.4683 32.6714 27.4683C36.3472 27.4683 38.7087 24.5465 38.7087 20.0199ZM73.2899 20.0199C73.2899 27.9003 69.6757 32.6121 63.5973 32.6121C58.4019 32.6121 55.219 29.5875 54.9726 24.4437V32.1389H48.5245V1.91352L54.9726 0.925896V15.5551C55.219 10.4523 58.4019 7.42775 63.5973 7.42775C69.6757 7.42775 73.2899 12.1395 73.2899 20.0199ZM66.7187 20.0199C66.7187 15.3287 64.4598 12.5305 60.6813 12.5305C58.8537 12.5305 57.3136 13.2506 56.2457 14.6086C55.1984 15.9254 54.644 17.7978 54.644 20.0199C54.644 24.5465 57.0055 27.4683 60.6813 27.4683C64.4598 27.4683 66.7187 24.6906 66.7187 20.0199ZM100.519 20.0199C100.519 27.9003 96.9053 32.6121 90.8269 32.6121C85.6315 32.6121 82.4486 29.5875 82.2021 24.4437V32.1389H75.7747V1.91352L82.2227 0.925896V15.5551C82.4691 10.4523 85.652 7.42775 90.8474 7.42775C96.9053 7.42775 100.54 12.1395 100.519 20.0199ZM93.9482 20.0199C93.9482 15.3287 91.6894 12.5305 87.9109 12.5305C86.0833 12.5305 84.5432 13.2506 83.4753 14.6086C82.428 15.9254 81.8736 17.7978 81.8736 20.0199C81.8736 24.5465 84.2351 27.4683 87.9109 27.4683C91.6894 27.4683 93.9482 24.6906 93.9482 20.0199Z"/>
+      </svg>
+      <div style="display:flex;gap:5px;align-items:center;">
+        <div id="invoice-count-badge" class="stats-badge">-</div>
+        <div id="hc-loading-spinner" style="margin-left:12px;display:none;align-items:center;">
+          <span class="hc-spinner" style="display:inline-block;width:22px;height:22px;border:3px solid #14D3FF;border-top:3px solid #3FF0B0;border-radius:50%;animation:hc-spin 1s linear infinite;"></span>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;justify-content:center;margin-bottom:10px;">
+      <div id="invoice-amount-badge" class="stats-badge amount-badge" style="font-size:18px;padding:6px 18px;">AED 0.00</div>
+    </div>
+    
+      <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:12px;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <label for="hc-status-input" style="flex:0 0 110px;font-weight:600;">Status:</label>
+          <div id="hc-status-dropdown-container" style="position:relative;flex:1;">
+            <input type="text" id="hc-status-input" placeholder="Select status..." readonly style="width:100%;padding:8px 36px 8px 12px;background:white;border:1px solid #ccc;border-radius:12px;font-size:15px;color:#131C26;cursor:pointer;position:relative;z-index:1;" />
+            <span id="hc-status-pill" style="display:none;position:absolute;left:12px;top:7px;background:#f5f6fa;border-radius:16px;padding:2px 10px 2px 10px;font-size:15px;font-weight:500;color:#333;max-width:80%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;z-index:2;align-items:center;">
+              <span id="hc-status-pill-label"></span>
+              <span id="hc-status-pill-clear" style="margin-left:8px;cursor:pointer;font-size:16px;">&times;</span>
+            </span>
+            <div id="hc-status-dropdown" style="display:none;position:absolute;top:100%;left:0;width:100%;background:white;border:1px solid #ccc;border-radius:0 0 12px 12px;box-shadow:0 2px 8px rgba(0,0,0,0.08);z-index:1001;max-height:180px;overflow-y:auto;"></div>
+            <input type="hidden" id="hc-status-value" value="" />
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <label for="hc-contact-name" style="flex:0 0 110px;font-weight:600;">Contact:</label>
+          <div style="flex:1;">
+            <input type="text" id="hc-contact-name" placeholder="Type to search contact" autocomplete="off" style="width:100%;padding:8px;background:white;border:1px solid #ccc;border-radius:12px;margin-bottom:0;color:#131C26;">
+            <div id="hc-contact-suggestions" style="position:relative;z-index:1000;"></div>
+            <input type="hidden" id="hc-contact-id">
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <label for="hc-due" style="flex:0 0 110px;font-weight:600;">From Due Date:</label>
+          <input type="date" id="hc-due" placeholder="mm/dd/yyyy" style="flex:1;padding:8px;background:white;border:1px solid #ccc;border-radius:12px;color:#131C26;">
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <label for="hc-to-due" style="flex:0 0 110px;font-weight:600;">To Due Date:</label>
+          <input type="date" id="hc-to-due" placeholder="mm/dd/yyyy" style="flex:1;padding:8px;background:white;border:1px solid #ccc;border-radius:12px;color:#131C26;">
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <label for="hc-min-amount" style="flex:0 0 110px;font-weight:600;">Min Amount:</label>
+          <input type="number" id="hc-min-amount" min="0" step="0.01" placeholder="0.00" style="flex:1;padding:8px;background:white;border:1px solid #ccc;border-radius:12px;color:#131C26;">
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <label for="hc-max-amount" style="flex:0 0 110px;font-weight:600;">Max Amount:</label>
+          <input type="number" id="hc-max-amount" min="0" step="0.01" placeholder="No limit" style="flex:1;padding:8px;background:white;border:1px solid #ccc;border-radius:12px;color:#131C26;">
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+          <span style="font-weight:600;flex:0 0 110px;">Only Unsent</span>
+          <label class="switch" style="margin-bottom:0;">
+            <input type="checkbox" id="hc-unsent" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+    
+    <div style="margin-bottom:10px;padding:10px;background:white;border-radius:12px;color:#131C26;font-size:13px;line-height:1.4;box-shadow:inset 0 0 4px rgba(0,0,0,0.05);">
+      <strong>ℹ️ Info:</strong><br/>
+      • Bulk invoice processing mode<br/>
+      • Email template ID used: <code>8</code><br/>
+      • Only invoices with a contact email will be sent<br/>
+      • Use Pause/Resume to control processing
+    </div>
+    
+    <div class="progress-bar" id="hc-progress">
+      <div class="progress-bar-fill" id="hc-progress-fill"></div>
+    </div>
+    
+    <div class="results-panel" id="hc-results">
+      <div style="font-weight:600;margin-bottom:5px;">Results:</div>
+      <div id="hc-results-content">No operations run yet</div>
+    </div>
+    
+    <button id="hc-run" style="width:100%;padding:10px;background:#131C26;color:white;border:none;border-radius:12px;font-weight:600;cursor:pointer;margin-top:12px;">SEND</button>
+    
+    <button id="hc-check" style="width:100%;padding:8px;background:rgba(255,255,255,0.25);color:#131C26;border:none;border-radius:12px;font-weight:500;cursor:pointer;margin-top:8px;font-size:13px;">Check Matching Invoices</button>
+    
+    <button id="hc-close" style="position:absolute;top:10px;right:10px;background:none;border:none;color:#131C26;font-size:16px;cursor:pointer;padding:5px;border-radius:50%;width:25px;height:25px;display:flex;align-items:center;justify-content:center;">✕</button>
+    
+    <p style="font-size:11px;text-align:center;margin-top:8px;color:#333">Hold tight, we're creating financial freedom 🚀</p>
+  </div>`;
+
+  document.body.appendChild(wrapper);
+  
+  // Add spinner CSS for loading animation
+  const spinnerStyle = document.createElement('style');
+  spinnerStyle.textContent = `
+    @keyframes hc-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  `;
+  document.head.appendChild(spinnerStyle);
+  
+  // Panel drag functionality
+  const panel = document.getElementById("hot-chili-panel");
+  let offsetX = 0, offsetY = 0, isDragging = false;
+
+  panel.addEventListener("mousedown", (e) => {
+    if (e.target === document.getElementById("hc-close")) return;
+    
+    isDragging = true;
+    offsetX = e.clientX - panel.getBoundingClientRect().left;
+    offsetY = e.clientY - panel.getBoundingClientRect().top;
+    panel.style.cursor = "grabbing";
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (!isDragging) return;
+    panel.style.top = `${e.clientY - offsetY}px`;
+    panel.style.right = "auto";
+    panel.style.left = `${e.clientX - offsetX}px`;
+  });
+
+  document.addEventListener("mouseup", () => {
+    isDragging = false;
+    panel.style.cursor = "grab";
+  });
+  
+  // Close button functionality
+  document.getElementById("hc-close").addEventListener("click", () => {
+    document.body.removeChild(wrapper);
+      sessionStorage.setItem('wafeqToolClosed', '1');
+  });
+  
+  // Format currency helper
+  const formatCurrency = (amount) => {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'AED',
+      minimumFractionDigits: 2
+    }).format(amount);
+  };
+    
+    // Status dropdown logic (must run after DOM elements exist)
+    (function() {
+      const statuses = [
+        { label: 'Overdue', value: 'OVERDUE' },
+        { label: 'Sent', value: 'SENT' },
+        { label: 'Paid', value: 'PAID' },
+        { label: 'Partially paid', value: 'PARTIALLY_PAID' },
+        { label: 'Draft', value: 'DRAFT' },
+        { label: 'Voided', value: 'VOIDED' }
+      ];
+      const input = document.getElementById('hc-status-input');
+      const dropdown = document.getElementById('hc-status-dropdown');
+      const pill = document.getElementById('hc-status-pill');
+      const pillLabel = document.getElementById('hc-status-pill-label');
+      const pillClear = document.getElementById('hc-status-pill-clear');
+      const valueInput = document.getElementById('hc-status-value');
+      function showDropdown() {
+        dropdown.innerHTML = '';
+        statuses.forEach(status => {
+          const item = document.createElement('div');
+          item.textContent = status.label;
+          item.style.padding = '10px 12px';
+          item.style.cursor = 'pointer';
+          item.style.fontSize = '15px';
+          item.onmouseenter = () => item.style.background = '#f0f0f0';
+          item.onmouseleave = () => item.style.background = '';
+          item.onclick = () => {
+            valueInput.value = status.value;
+            pillLabel.textContent = status.label;
+            pill.style.display = 'inline-flex';
+            input.value = '';
+            input.placeholder = '';
+            dropdown.style.display = 'none';
+          };
+          dropdown.appendChild(item);
+        });
+        dropdown.style.display = 'block';
+      }
+      input.addEventListener('click', showDropdown);
+      input.addEventListener('focus', showDropdown);
+      document.addEventListener('click', function(e) {
+        if (!dropdown.contains(e.target) && e.target !== input && e.target !== pill && e.target !== pillLabel && e.target !== pillClear) {
+          dropdown.style.display = 'none';
+        }
+      });
+      pillClear.onclick = function() {
+        valueInput.value = '';
+        pill.style.display = 'none';
+        input.placeholder = 'Select status...';
+      };
+      // Show pill if value is set (for reloads or programmatic set)
+      if (valueInput.value) {
+        const found = statuses.find(s => s.value === valueInput.value);
+        if (found) {
+          pillLabel.textContent = found.label;
+          pill.style.display = 'inline-flex';
+        }
+      }
+    })();
+  
+  // Check matching invoices functionality
+  document.getElementById("hc-check").addEventListener("click", async () => {
+    document.getElementById('hc-loading-spinner').style.display = 'flex'; // Show spinner
+    const amountBadge = document.getElementById("invoice-amount-badge");
+    if (amountBadge) amountBadge.textContent = 'Calculating...';
+    const statusFilter = document.getElementById("hc-status-value").value;
+    const onlyUnsent = document.getElementById("hc-unsent").checked;
+    const fromDueDate = document.getElementById("hc-due").value;
+    const dueAfter = document.getElementById("hc-max-amount").value;
+    const minAmount = parseFloat(document.getElementById("hc-min-amount").value || "0");
+    const maxAmount = parseFloat(document.getElementById("hc-max-amount").value || "Infinity");
+    const contactId = document.getElementById("hc-contact-id").value.trim();
+    
+    // Show progress
+    const progressBar = document.getElementById("hc-progress");
+    const progressFill = document.getElementById("hc-progress-fill");
+    progressBar.style.display = "block";
+    progressFill.style.width = "5%";
+    
+    const resultsPanel = document.getElementById("hc-results");
+    const resultsContent = document.getElementById("hc-results-content");
+    resultsPanel.style.display = "block";
+    resultsContent.innerHTML = "Starting search...";
+
+    // Add pause/resume button for consistency
+    let isPaused = false;
+    const pauseButton = document.createElement('button');
+    pauseButton.id = 'hc-check-pause';
+    pauseButton.style.cssText = `
+      width: 100%;
+      padding: 8px;
+      background: rgba(255,255,255,0.25);
+      color: #131C26;
+      border: none;
+      border-radius: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      margin-top: 8px;
+      font-size: 13px;
+    `;
+    pauseButton.textContent = 'Pause Processing';
+    pauseButton.onclick = () => {
+      isPaused = !isPaused;
+      pauseButton.textContent = isPaused ? 'Resume Processing' : 'Pause Processing';
+    };
+    
+    document.getElementById('hc-check').insertAdjacentElement('afterend', pauseButton);
+    
+    try {
+        // Build query with correct server-side filters and pagination
+      let queryParams = new URLSearchParams();
+        const limit = 40;
+        let offset = 0;
+        queryParams.append('limit', limit.toString());
+        queryParams.append('offset', offset.toString());
+        if (statusFilter) queryParams.append('status__in', statusFilter.toUpperCase());
+        if (onlyUnsent !== undefined) queryParams.append('is_sent', onlyUnsent ? 'false' : 'true');
+        if (fromDueDate) queryParams.append('invoice_due_date_after', fromDueDate);
+        if (dueAfter) queryParams.append('invoice_due_date_before', dueAfter);
+        if (minAmount !== undefined && minAmount !== null && minAmount !== '' && isFinite(minAmount) && minAmount > 0) queryParams.append('amount_min', minAmount);
+        if (maxAmount !== undefined && maxAmount !== null && maxAmount !== '' && isFinite(maxAmount)) queryParams.append('amount_max', maxAmount);
+        if (contactId) queryParams.append('contact__in', contactId);
+
+      const baseUrl = 'https://app.wafeq.com/internal/v1/1624/invoicing/invoices-flat/';
+        // --- Batch parallel fetching ---
+        let allInvoices = [];
+        let filteredCount = 0;
+        let totalFetched = 0;
+        // First, get the total count and calculate total pages
+        let countParams = new URLSearchParams(queryParams);
+        countParams.set('limit', '1'); // Only for count request
+        const countRes = await fetch(`${baseUrl}?${countParams.toString()}`, { headers: { "Accept": "application/json" }, credentials: "include" });
+        const countData = await countRes.json();
+        const totalInvoices = countData.count;
+        const totalPages = Math.ceil(totalInvoices / limit);
+        const pageUrls = [];
+        for (let page = 0; page < totalPages; page++) {
+          const pageQueryParams = new URLSearchParams(queryParams);
+          pageQueryParams.set('offset', (page * limit).toString());
+          pageUrls.push(`${baseUrl}?${pageQueryParams.toString()}`);
+        }
+        const batchSize = 25;
+        for (let i = 0; i < pageUrls.length; i += batchSize) {
+          const batch = pageUrls.slice(i, i + batchSize);
+          const fetchPromises = batch.map(url =>
+            fetch(url, { headers: { "Accept": "application/json" }, credentials: "include" })
+              .then(res => res.json())
+              .then(data => data.results)
+          );
+          const batchResults = await Promise.all(fetchPromises);
+          batchResults.forEach(results => {
+            allInvoices = allInvoices.concat(results);
+            totalFetched += results.length;
+          });
+          console.log("Raw results sample:", allInvoices.slice(0, 3));
+          // Show fetched count in UI
+          resultsContent.innerHTML = `Fetched: ${totalFetched} invoices...`;
+          // Show filtered count so far
+          let tempFiltered = allInvoices;
+          if (statusFilter) {
+            tempFiltered = tempFiltered.filter(invoice => invoice.status && invoice.status.toLowerCase() === statusFilter.toLowerCase());
+          }
+        if (minAmount && maxAmount && minAmount === maxAmount) {
+          const targetAmount = Number(minAmount).toFixed(2);
+            tempFiltered = tempFiltered.filter(invoice => Number(invoice.amount).toFixed(2) === targetAmount);
+          }
+          if (fromDueDate) {
+            const dueDate = new Date(fromDueDate);
+            tempFiltered = tempFiltered.filter(invoice => new Date(invoice.due_date) >= dueDate);
+          }
+        if (onlyUnsent) {
+            tempFiltered = tempFiltered.filter(invoice => invoice.is_sent === false || invoice.is_sent === "false");
+          }
+          filteredCount = tempFiltered.length;
+          resultsContent.innerHTML += `<br>Matching filter: ${filteredCount} invoices`;
+          progressFill.style.width = `${Math.min(90, 5 + (85 * ((i + batch.length) / pageUrls.length))) }%`;
+        }
+        console.log('Total invoices fetched:', allInvoices.length);
+        // Deduplicate invoices by ID after fetching all batches
+        const uniqueInvoicesMap = new Map();
+        allInvoices.forEach(inv => {
+          if (!uniqueInvoicesMap.has(inv.id)) {
+            uniqueInvoicesMap.set(inv.id, inv);
+          }
+        });
+        const uniqueInvoices = Array.from(uniqueInvoicesMap.values());
+        console.log('Deduplicated invoices:', uniqueInvoices.length);
+        // Use uniqueInvoices for all further processing and filtering
+
+        // After deduplication, before filtering for contact email
+        const totalFetchedAmount = uniqueInvoices.reduce((sum, inv) => sum + (inv.amount || 0), 0);
+
+        // --- Contact email lookup using id__in batching ---
+        const contactIds = [...new Set(uniqueInvoices.map(inv => inv.contact))];
+        const contactEmailMap = {};
+        const contactBatchSize = 40;
+        for (let i = 0; i < contactIds.length; i += contactBatchSize) {
+          const batch = contactIds.slice(i, i + contactBatchSize);
+          const url = `https://app.wafeq.com/internal/v1/1624/invoicing/contacts/?id__in=${batch.join(",")}`;
+          try {
+            const res = await fetch(url, { headers: { "Accept": "application/json" }, credentials: "include" });
+            const data = await res.json();
+            data.results.forEach(contact => {
+              let email = contact.email && contact.email.trim();
+              if (!email && contact.persons && contact.persons.length > 0) {
+                email = contact.persons.find(p => p.email && p.email.trim() !== "")?.email.trim() || "";
+              }
+              contactEmailMap[contact.id] = email;
+            });
+          } catch (e) {
+            console.warn("⚠️ Failed to fetch contact batch", e);
+          }
+        }
+
+        // Only keep invoices whose contact has a non-empty email
+        const invoicesWithEmail = uniqueInvoices.filter(inv => {
+          const email = contactEmailMap[inv.contact];
+          return email && email !== "";
+        });
+        const invoicesWithoutEmail = uniqueInvoices.length - invoicesWithEmail.length;
+
+        // --- Apply email template to invoices missing it ---
+        const invoicesToUpdate = invoicesWithEmail.filter(inv => !inv.email_template).map(inv => ({ id: inv.id, email_template: 8 }));
+        if (invoicesToUpdate.length > 0) {
+          resultsContent.innerHTML = `Applying email template to ${invoicesToUpdate.length} invoices...`;
+          try {
+            const patchRes = await fetch("https://app.wafeq.com/internal/v1/1624/invoicing/invoice-properties/update/", {
+              method: "PATCH",
+              headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "x-csrftoken": csrfToken
+              },
+              credentials: "include",
+              body: JSON.stringify(invoicesToUpdate)
+            });
+            if (!patchRes.ok) throw new Error("Failed to apply templates");
+            invoicesWithEmail.forEach(inv => { if (!inv.email_template) inv.email_template = 8; });
+          } catch (e) {
+            resultsContent.innerHTML = "❌ Error applying email templates. See console for details.";
+            throw e;
+          }
+        }
+
+        // Calculate total for invoices ready to send
+        const totalReadyAmount = invoicesWithEmail.reduce((sum, inv) => sum + (inv.amount || 0), 0);
+
+        // Update UI
+        const countBadge = document.getElementById("invoice-count-badge");
+        if (countBadge) countBadge.textContent = `${invoicesWithEmail.length} Invoices`;
+        const amountBadge = document.getElementById("invoice-amount-badge");
+        if (amountBadge) amountBadge.textContent = totalReadyAmount === 0 ? 'AED 0.00' : formatCurrency(totalReadyAmount);
+
+        let emailNote = "";
+        if (invoicesWithoutEmail > 0) {
+          emailNote = `<br><span style='color:#d9534f;font-weight:600;'>${invoicesWithoutEmail} invoices excluded (no contact email)</span>`;
+        }
+
+        if (invoicesWithEmail.length === 0) {
+          resultsContent.innerHTML = `
+            <div style="line-height:1.7;">
+              <span style="font-weight:600; color:#131C26;">Fetched:</span> <b>${uniqueInvoices.length}</b><br>
+              <span style="font-weight:600; color:#131C26;">Excluded (No Email):</span> <b>${invoicesWithoutEmail}</b><br>
+              <span style="font-weight:600; color:#131C26;">Ready to Send:</span> <b>0</b><br>
+              <span style="font-weight:600; color:#131C26;">Total Amount:</span> <b>${formatCurrency(totalFetchedAmount)}</b>
+            </div>
+          `;
+          document.getElementById('hc-loading-spinner').style.display = 'none';
+          return;
+        }
+
+        // Only preview and show stats/results
+        resultsContent.innerHTML = `\n        <div style="line-height:1.7;">\n          <span style="font-weight:600; color:#131C26;">Fetched:</span> <b>${uniqueInvoices.length}</b><br>\n          <span style="font-weight:600; color:#131C26;">Excluded (No Email):</span> <b>${invoicesWithoutEmail}</b><br>\n          <span style="font-weight:600; color:#131C26;">Ready to Send:</span> <b>${invoicesWithEmail.length}</b><br>\n          <span style="font-weight:600; color:#131C26;">Total Amount:</span> <b>${formatCurrency(totalFetchedAmount)}</b>\n        </div>\n      `;
+    } finally {
+      document.getElementById('hc-loading-spinner').style.display = 'none'; // Hide spinner
+    }
+  });
+
+  // SEND button functionality - bulk send only - optimized for speed
+  const sendButton = document.getElementById("hc-run");
+  sendButton.textContent = "SEND";
+  sendButton.onclick = async () => {
+    document.getElementById('hc-loading-spinner').style.display = 'flex'; // Show spinner
+    const amountBadge = document.getElementById("invoice-amount-badge");
+    if (amountBadge) amountBadge.textContent = 'Calculating...';
+    try {
+      // Build query with correct server-side filters and pagination (same as check)
+      let queryParams = new URLSearchParams();
+      const limit = 40;
+      let offset = 0;
+      const statusFilter = document.getElementById("hc-status-value").value;
+      const onlyUnsent = document.getElementById("hc-unsent").checked;
+      const fromDueDate = document.getElementById("hc-due").value;
+      const toDueDate = document.getElementById("hc-to-due").value;
+      const minAmount = parseFloat(document.getElementById("hc-min-amount").value || "0");
+      const maxAmount = parseFloat(document.getElementById("hc-max-amount").value || "Infinity");
+      const contactId = document.getElementById("hc-contact-id").value.trim();
+      if (statusFilter) queryParams.append('status__in', statusFilter);
+      if (onlyUnsent !== undefined) queryParams.append('is_sent', onlyUnsent ? 'false' : 'true');
+      if (fromDueDate) queryParams.append('invoice_due_date_after', fromDueDate);
+      if (toDueDate) queryParams.append('invoice_due_date_before', toDueDate);
+      if (minAmount !== undefined && minAmount !== null && minAmount !== '' && isFinite(minAmount) && minAmount > 0) queryParams.append('amount_min', minAmount);
+      if (maxAmount !== undefined && maxAmount !== null && maxAmount !== '' && isFinite(maxAmount)) queryParams.append('amount_max', maxAmount);
+      if (contactId) queryParams.append('contact__in', contactId);
+      queryParams.append('limit', limit.toString());
+      queryParams.append('offset', offset.toString());
+      const baseUrl = 'https://app.wafeq.com/internal/v1/1624/invoicing/invoices-flat/';
+      // --- Batch parallel fetching ---
+      let allInvoices = [];
+      let filteredCount = 0;
+      let totalFetched = 0;
+      // First, get the total count and calculate total pages
+      let countParams = new URLSearchParams(queryParams);
+      countParams.set('limit', '1'); // Only for count request
+      const countRes = await fetch(`${baseUrl}?${countParams.toString()}`, { headers: { "Accept": "application/json" }, credentials: "include" });
+      const countData = await countRes.json();
+      const totalInvoices = countData.count;
+      const totalPages = Math.ceil(totalInvoices / limit);
+      const pageUrls = [];
+      for (let page = 0; page < totalPages; page++) {
+        const pageQueryParams = new URLSearchParams(queryParams);
+        pageQueryParams.set('offset', (page * limit).toString());
+        pageUrls.push(`${baseUrl}?${pageQueryParams.toString()}`);
+      }
+      const batchSize = 25;
+      for (let i = 0; i < pageUrls.length; i += batchSize) {
+        const batch = pageUrls.slice(i, i + batchSize);
+        const fetchPromises = batch.map(url =>
+          fetch(url, { headers: { "Accept": "application/json" }, credentials: "include" })
+            .then(res => res.json())
+            .then(data => data.results)
+        );
+        const batchResults = await Promise.all(fetchPromises);
+        batchResults.forEach(results => {
+          allInvoices = allInvoices.concat(results);
+          totalFetched += results.length;
+        });
+      }
+      // Deduplicate invoices by ID after fetching all batches
+      const uniqueInvoicesMap = new Map();
+      allInvoices.forEach(inv => {
+        if (!uniqueInvoicesMap.has(inv.id)) {
+          uniqueInvoicesMap.set(inv.id, inv);
+        }
+      });
+      const uniqueInvoices = Array.from(uniqueInvoicesMap.values());
+      // --- Contact email lookup using id__in batching ---
+      const contactIds = [...new Set(uniqueInvoices.map(inv => inv.contact))];
+      const contactEmailMap = {};
+      const contactBatchSize = 40;
+      for (let i = 0; i < contactIds.length; i += contactBatchSize) {
+        const batch = contactIds.slice(i, i + contactBatchSize);
+        const url = `https://app.wafeq.com/internal/v1/1624/invoicing/contacts/?id__in=${batch.join(",")}`;
+        try {
+          const res = await fetch(url, { headers: { "Accept": "application/json" }, credentials: "include" });
+          const data = await res.json();
+          data.results.forEach(contact => {
+            let email = contact.email && contact.email.trim();
+            if (!email && contact.persons && contact.persons.length > 0) {
+              email = contact.persons.find(p => p.email && p.email.trim() !== "")?.email.trim() || "";
+            }
+            contactEmailMap[contact.id] = email;
+          });
+        } catch (e) {
+          console.warn("⚠️ Failed to fetch contact batch", e);
+        }
+      }
+      // Only keep invoices whose contact has a non-empty email
+      const invoicesWithEmail = uniqueInvoices.filter(inv => {
+        const email = contactEmailMap[inv.contact];
+        return email && email !== "";
+      });
+      const invoicesWithoutEmail = uniqueInvoices.length - invoicesWithEmail.length;
+      // --- Apply email template to invoices missing it ---
+      const invoicesToUpdate = invoicesWithEmail.filter(inv => !inv.email_template).map(inv => ({ id: inv.id, email_template: 8 }));
+      if (invoicesToUpdate.length > 0) {
+        try {
+          const patchRes = await fetch("https://app.wafeq.com/internal/v1/1624/invoicing/invoice-properties/update/", {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+              "x-csrftoken": csrfToken
+            },
+            credentials: "include",
+            body: JSON.stringify(invoicesToUpdate)
+          });
+          if (!patchRes.ok) throw new Error("Failed to apply templates");
+          invoicesWithEmail.forEach(inv => { if (!inv.email_template) inv.email_template = 8; });
+        } catch (e) {
+          alert("❌ Error applying email templates. See console for details.");
+          document.getElementById('hc-loading-spinner').style.display = 'none';
+          return;
+        }
+      }
+      // Calculate total for invoices ready to send
+      const totalFetchedAmount = uniqueInvoices.reduce((sum, inv) => sum + (inv.amount || 0), 0);
+      // Confirm with user
+      const confirmMessage = `Send ${invoicesWithEmail.length} invoices to their respective contacts?${invoicesWithoutEmail > 0 ? `\n\n${invoicesWithoutEmail} invoices were skipped due to missing contact emails.` : ''}`;
+      const confirmSend = confirm(confirmMessage);
+      if (!confirmSend) {
+        document.getElementById('hc-loading-spinner').style.display = 'none';
+        return;
+      }
+      // Send invoices in batches to the correct endpoint
+      const invoiceIds = invoicesWithEmail.map(inv => inv.id);
+      const batchSendSize = 10;
+      let totalQueued = 0;
+      let totalFailed = 0;
+      for (let i = 0; i < invoiceIds.length; i += batchSendSize) {
+        const batchIds = invoiceIds.slice(i, i + batchSendSize);
+        try {
+          const sendRes = await fetch("https://app.wafeq.com/internal/v1/1624/invoicing/invoices/send/", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+              "x-csrftoken": csrfToken
+            },
+            credentials: "include",
+            body: JSON.stringify({ invoice_ids: batchIds })
+          });
+          if (!sendRes.ok) throw new Error(`HTTP error! Status: ${sendRes.status}`);
+          const sendData = await sendRes.json();
+          totalQueued += sendData.queued || 0;
+        } catch (error) {
+          console.error(`❌ Error sending batch:`, error);
+          totalFailed += batchIds.length;
+        }
+      }
+      // Show results
+      const resultsContent = document.getElementById("hc-results-content");
+      resultsContent.innerHTML = `\n        <div style="line-height:1.7;">\n          <span style="font-weight:600; color:#131C26;">Fetched:</span> <b>${uniqueInvoices.length}</b><br>\n          <span style="font-weight:600; color:#131C26;">Excluded (No Email):</span> <b>${invoicesWithoutEmail}</b><br>\n          <span style="font-weight:600; color:#131C26;">Queued to Send:</span> <b>${totalQueued}</b><br>\n          <span style="font-weight:600; color:#d9534f;">Failed to Queue:</span> <b>${totalFailed}</b><br>\n          <span style="font-weight:600; color:#131C26;">Total Amount:</span> <b>${formatCurrency(totalFetchedAmount)}</b>\n        </div>\n      `;
+    } finally {
+      document.getElementById('hc-loading-spinner').style.display = 'none'; // Hide spinner
+    }
+  };
+
+  // Initial invoice check
+  setTimeout(async () => {
+    try {
+      // Show loading
+        const countBadge = document.getElementById("invoice-count-badge");
+        if (countBadge) countBadge.textContent = `Loading...`;
+        // Do NOT update amountBadge here; leave it as 'AED 0.00' from initial render
+        // ... rest of initial invoice check ...
+      } catch (error) {
+        // ... error handling ...
+      }
+    }, 500);
+
+    // Contact name input functionality
+    const nameInput = document.getElementById('hc-contact-name');
+    const idInput = document.getElementById('hc-contact-id');
+    const suggestionsDiv = document.getElementById('hc-contact-suggestions');
+    let lastFetch = 0;
+    let lastValue = '';
+    let suggestionsList = null;
+    nameInput.addEventListener('input', async function() {
+      const value = nameInput.value.trim();
+      idInput.value = '';
+      if (value.length < 2) { if (suggestionsList) suggestionsList.remove(); return; }
+      lastValue = value;
+      lastFetch = Date.now();
+      const fetchTime = lastFetch;
+      const url = `https://app.wafeq.com/internal/v1/1624/invoicing/contacts/?limit=10&offset=0&keyword=${encodeURIComponent(value)}`;
+      try {
+        const res = await fetch(url, { headers: { "Accept": "application/json" }, credentials: "include" });
+        const data = await res.json();
+        if (lastValue !== value || fetchTime !== lastFetch) return;
+        if (suggestionsList) suggestionsList.remove();
+        suggestionsList = document.createElement('div');
+        suggestionsList.id = 'hc-contact-suggestions-list';
+        data.results.forEach(contact => {
+          const item = document.createElement('div');
+          item.className = 'hc-contact-suggestion';
+          item.textContent = contact.name + (contact.id ? ` (#${contact.id})` : '');
+          item.onclick = () => {
+            nameInput.value = contact.name;
+            idInput.value = contact.id;
+            suggestionsList.remove();
+          };
+          suggestionsList.appendChild(item);
+        });
+        if (data.results.length === 0) {
+          const item = document.createElement('div');
+          item.className = 'hc-contact-suggestion';
+          item.textContent = 'No contacts found';
+          suggestionsList.appendChild(item);
+        }
+        suggestionsDiv.appendChild(suggestionsList);
+      } catch (e) {
+        if (suggestionsList) suggestionsList.remove();
+      }
+    });
+    document.addEventListener('click', function(e) {
+      if (!suggestionsDiv.contains(e.target) && e.target !== nameInput) {
+        if (suggestionsList) suggestionsList.remove();
+      }
+    });
+  }
+
+  // Run once in case the page is already loaded
+  if (window.location.pathname === '/c/1624/invoicing') {
+    injectTool();
+  }
+
+  // Observe DOM changes for SPA navigation
+  const observer = new MutationObserver(() => {
+    if (window.location.pathname === '/c/1624/invoicing') {
+      injectTool();
+    }
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+
+  // Watch for URL changes (SPA navigation)
+  let lastUrl = location.pathname;
+  setInterval(() => {
+    if (location.pathname !== lastUrl) {
+      // If we leave /c/1624/invoicing, clear the close flag
+      if (lastUrl === '/c/1624/invoicing') {
+        sessionStorage.removeItem('wafeqToolClosed');
+      }
+      lastUrl = location.pathname;
+      if (location.pathname === '/c/1624/invoicing') {
+        injectTool();
+      }
+    }
+  }, 500);
+  
+})();
