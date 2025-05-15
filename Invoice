@@ -197,7 +197,11 @@ window.addEventListener('load', () => {
       border-radius: 5px;
       margin: 10px 0;
       overflow: hidden;
-      display: none;
+      display: none; /* Hide by default */
+    }
+
+    .progress-bar.visible {
+      display: block; /* Show only when visible class is added */
     }
 
     .progress-bar-fill {
@@ -233,7 +237,11 @@ window.addEventListener('load', () => {
       background: rgba(255,255,255,0.15);
       border-radius: 12px;
       font-size: 12px;
-      display: none;
+      display: none; /* Hide by default */
+    }
+
+    .results-panel.visible {
+      display: block; /* Show only when visible class is added */
     }
 
     .invoice-list-container {
@@ -394,19 +402,35 @@ window.addEventListener('load', () => {
       cursor: pointer;
       margin-top: 12px;
       font-size: 15px;
-      transition: background 0.2s;
+      transition: all 0.2s ease;
     }
+
+    .hc-btn:hover {
+      transform: scale(1.02);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    }
+
     .hc-btn-light {
       background: rgba(255,255,255,0.25);
       color: #131C26;
       font-weight: 500;
       font-size: 13px;
     }
+
+    .hc-btn-light:hover {
+      background: rgba(255,255,255,0.35);
+    }
+
     .hc-btn-red {
       background: linear-gradient(135deg, #FFB6B6 0%, #FF7F7F 100%) !important;
       color: #fff !important;
       border: none;
     }
+
+    .hc-btn-red:hover {
+      background: linear-gradient(135deg, #FF9E9E 0%, #FF6B6B 100%) !important;
+    }
+
     .hc-btn-row {
       display: flex;
       gap: 10px;
@@ -499,14 +523,6 @@ window.addEventListener('load', () => {
         </div>
       </div>
 
-      <div style="margin-bottom:10px;padding:10px;background:white;border-radius:12px;color:#131C26;font-size:13px;line-height:1.4;box-shadow:inset 0 0 4px rgba(0,0,0,0.05);">
-        <strong>ℹ️ Info:</strong><br/>
-        • Bulk invoice processing mode<br/>
-        • Email template ID used: <code>8</code><br/>
-        • Only invoices with a contact email will be sent<br/>
-        • Use Pause/Resume to control processing
-      </div>
-
       <div class="progress-bar" id="hc-progress">
         <div class="progress-bar-fill" id="hc-progress-fill"></div>
       </div>
@@ -516,7 +532,7 @@ window.addEventListener('load', () => {
         <div id="hc-results-content">No operations run yet</div>
       </div>
 
-      <button id="hc-check" style="width:100%;padding:8px;background:rgba(255,255,255,0.25);color:#131C26;border:none;border-radius:12px;font-weight:500;cursor:pointer;margin-top:8px;font-size:13px;">Check Matching Invoices</button>
+      <button id="hc-check" style="width:100%;padding:8px;background:rgba(255,255,255,0.25);color:#131C26;border:none;border-radius:12px;font-weight:500;cursor:pointer;margin-top:8px;font-size:13px;transition:all 0.2s ease;">Check Matching Invoices</button>
       <button id="hc-pause" class="hc-btn hc-btn-light" style="display:none;">Pause</button>
       <button id="hc-cancel" class="hc-btn hc-btn-red" style="display:none;">Cancel</button>
       <button id="hc-run" style="width:100%;padding:10px;background:#131C26;color:white;border:none;border-radius:12px;font-weight:600;cursor:pointer;margin-top:12px;">SEND</button>
@@ -776,13 +792,21 @@ window.addEventListener('load', () => {
   const sendYesBtn = document.getElementById('hc-send-yes');
   const sendNoBtn = document.getElementById('hc-send-no');
 
-  // --- Button flow logic (robust show/hide) ---
+  function setButtonClasses() {
+    if (checkBtn) checkBtn.className = 'hc-btn hc-btn-light';
+    if (pauseBtn) pauseBtn.className = 'hc-btn hc-btn-light';
+    if (cancelBtn) cancelBtn.className = 'hc-btn hc-btn-red';
+    if (sendBtn) sendBtn.className = 'hc-btn';
+    if (sendYesBtn) sendYesBtn.className = 'hc-btn';
+    if (sendNoBtn) sendNoBtn.className = 'hc-btn hc-btn-red';
+  }
   function resetButtons() {
     checkBtn.style.display = '';
     pauseBtn.style.display = 'none';
     cancelBtn.style.display = 'none';
     sendBtn.style.display = 'none';
     sendConfirmRow.style.display = 'none';
+    setButtonClasses();
   }
   function showFetchButtons() {
     checkBtn.style.display = 'none';
@@ -790,6 +814,7 @@ window.addEventListener('load', () => {
     cancelBtn.style.display = '';
     sendBtn.style.display = 'none';
     sendConfirmRow.style.display = 'none';
+    setButtonClasses();
   }
   function showSendButton() {
     checkBtn.style.display = 'none';
@@ -815,12 +840,46 @@ window.addEventListener('load', () => {
   // Initial state
   resetButtons();
 
+  let isPaused = false;
+  let isCancelled = false;
+  pauseBtn.onclick = () => {
+    if (!isPaused) {
+      isPaused = true;
+      pauseBtn.textContent = 'Resume';
+    } else {
+      isPaused = false;
+      pauseBtn.textContent = 'Pause';
+    }
+  };
+  cancelBtn.onclick = () => { isCancelled = true; };
+
   // --- Check Matching Invoices ---
   document.getElementById("hc-check").addEventListener("click", async () => {
+    isPaused = false;
+    isCancelled = false;
+    pauseBtn.textContent = 'Pause';
     showFetchButtons();
-    document.getElementById('hc-loading-spinner').style.display = 'flex'; // Show spinner
+    document.getElementById('hc-loading-spinner').style.display = 'flex';
     const amountBadge = document.getElementById("invoice-amount-badge");
     if (amountBadge) amountBadge.textContent = 'Calculating...';
+
+    // Show progress bar and results panel only when checking
+    const progressBar = document.getElementById("hc-progress");
+    const progressFill = document.getElementById("hc-progress-fill");
+    const resultsPanel = document.getElementById("hc-results");
+    const resultsContent = document.getElementById("hc-results-content");
+    
+    if (progressBar) {
+        progressBar.style.display = 'block';
+        progressBar.classList.add('visible');
+    }
+    if (resultsPanel) {
+        resultsPanel.style.display = 'block';
+        resultsPanel.classList.add('visible');
+    }
+    
+    resultsContent.innerHTML = "Starting search...";
+    progressFill.style.width = "5%";
 
     // Gather filters
     const statusFilter = document.getElementById("hc-status-value").value;
@@ -830,17 +889,6 @@ window.addEventListener('load', () => {
     const minAmount = parseFloat(document.getElementById("hc-min-amount").value || "0");
     const maxAmount = parseFloat(document.getElementById("hc-max-amount").value || "Infinity");
     const contactId = document.getElementById("hc-contact-id").value.trim();
-
-    // Show progress
-    const progressBar = document.getElementById("hc-progress");
-    const progressFill = document.getElementById("hc-progress-fill");
-    progressBar.style.display = "block";
-    progressFill.style.width = "5%";
-
-    const resultsPanel = document.getElementById("hc-results");
-    const resultsContent = document.getElementById("hc-results-content");
-    resultsPanel.style.display = "block";
-    resultsContent.innerHTML = "Starting search...";
 
     try {
       // Build query with correct server-side filters and pagination
@@ -875,6 +923,27 @@ window.addEventListener('load', () => {
       }
       const batchSize = 25;
       for (let i = 0; i < pageUrls.length; i += batchSize) {
+        if (isCancelled) {
+          resultsContent.innerHTML = "❌ Fetching cancelled by user.";
+          break;
+        }
+        while (isPaused) {
+          // Always keep progress bar and results panel visible while paused
+          progressBar.classList.add('visible');
+          resultsPanel.classList.add('visible');
+          if (!resultsContent.innerHTML.includes('Paused...')) {
+            resultsContent.innerHTML += "<br><span style='color:#FFA500;font-weight:600;'>Paused...</span>";
+          }
+          await new Promise(r => setTimeout(r, 200));
+          if (isCancelled) {
+            resultsContent.innerHTML = "❌ Fetching cancelled by user.";
+            break;
+          }
+        }
+        // Remove 'Paused...' message if resuming
+        if (resultsContent.innerHTML.includes('Paused...')) {
+          resultsContent.innerHTML = resultsContent.innerHTML.replace(/<br><span style='color:#FFA500;font-weight:600;'>Paused\.\.\.<\/span>/g, '');
+        }
         const batch = pageUrls.slice(i, i + batchSize);
         const fetchPromises = batch.map(url =>
           fetch(url, { headers: { "Accept": "application/json" }, credentials: "include" })
@@ -885,6 +954,13 @@ window.addEventListener('load', () => {
         batchResults.forEach(results => {
           allInvoices = allInvoices.concat(results);
         });
+        // Update progress bar and results after each batch
+        progressFill.style.width = `${Math.round(((i + batch.length) / pageUrls.length) * 100)}%`;
+        resultsPanel.classList.add('visible');
+        resultsPanel.style.display = '';
+        resultsContent.innerHTML = `Fetched: ${allInvoices.length} invoices...`;
+        // Force UI update
+        await new Promise(r => setTimeout(r, 0));
       }
       // Deduplicate invoices by ID after fetching all batches
       const uniqueInvoicesMap = new Map();
@@ -932,7 +1008,10 @@ window.addEventListener('load', () => {
       const invoicesWithoutEmail = uniqueInvoices.length - invoicesWithEmail.length;
 
       // --- Apply email template to invoices missing it ---
-      const invoicesToUpdate = invoicesWithEmail.filter(inv => !inv.email_template).map(inv => ({ id: inv.id, email_template: 8 }));
+      const currentEntityId = getEntityId();
+      const templateId = currentEntityId === "1686" ? 10 : 8;
+      
+      const invoicesToUpdate = invoicesWithEmail.filter(inv => !inv.email_template).map(inv => ({ id: inv.id, email_template: templateId }));
       if (invoicesToUpdate.length > 0) {
         resultsContent.innerHTML = `Applying email template to ${invoicesToUpdate.length} invoices...`;
         try {
@@ -947,7 +1026,7 @@ window.addEventListener('load', () => {
             body: JSON.stringify(invoicesToUpdate)
           });
           if (!patchRes.ok) throw new Error("Failed to apply templates");
-          invoicesWithEmail.forEach(inv => { if (!inv.email_template) inv.email_template = 8; });
+          invoicesWithEmail.forEach(inv => { if (!inv.email_template) inv.email_template = templateId; });
         } catch (e) {
           resultsContent.innerHTML = "❌ Error applying email templates. See console for details.";
           throw e;
@@ -1417,7 +1496,7 @@ window.addEventListener('load', () => {
     }
     // UI progress setup
     const total = invoicesWithEmail.length;
-    const batchSendSize = 500;
+    const batchSendSize = 1000;
     const totalBatches = Math.ceil(total / batchSendSize);
     let totalQueued = 0;
     let totalFailed = 0;
@@ -1552,4 +1631,48 @@ window.addEventListener('load', () => {
     // Update analytics if possible
     if (typeof renderAnalytics === 'function') renderAnalytics();
   }
+
+  // Add export button hover effect (scale and shadow, no color change)
+  const exportBtnStyle = document.createElement('style');
+  exportBtnStyle.textContent = `
+  .analytics-export-btn {
+    transition: transform 0.2s, box-shadow 0.2s;
+  }
+  .analytics-export-btn:hover {
+    transform: scale(1.03);
+    box-shadow: 0 2px 8px rgba(20, 211, 255, 0.15);
+    background: #131C26 !important;
+    color: #fff !important;
+  }`;
+  document.head.appendChild(exportBtnStyle);
+
+  // Ensure progress bar CSS is present
+  const progressBarStyle = document.createElement('style');
+  progressBarStyle.textContent = `
+  .progress-bar {
+    display: none;
+  }
+  .progress-bar.visible {
+    display: block;
+  }
+  `;
+  document.head.appendChild(progressBarStyle);
+
+  // Add reset function to hide panels when needed
+  function resetPanels() {
+    const progressBar = document.getElementById("hc-progress");
+    const resultsPanel = document.getElementById("hc-results");
+    
+    if (progressBar) {
+        progressBar.style.display = 'none';
+        progressBar.classList.remove('visible');
+    }
+    if (resultsPanel) {
+        resultsPanel.style.display = 'none';
+        resultsPanel.classList.remove('visible');
+    }
+  }
+
+  // Call resetPanels when initializing
+  resetPanels();
 })();
