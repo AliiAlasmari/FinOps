@@ -906,162 +906,389 @@ window.addEventListener('load', () => {
       if (contactId) queryParams.append('contact__in', contactId);
 
       const baseUrl = getApiUrl('invoices-flat/');
-      // --- Batch parallel fetching ---
-      let allInvoices = [];
-      // First, get the total count and calculate total pages
-      let countParams = new URLSearchParams(queryParams);
-      countParams.set('limit', '1'); // Only for count request
-      const countRes = await fetch(`${baseUrl}?${countParams.toString()}`, { headers: { "Accept": "application/json" }, credentials: "include" });
-      const countData = await countRes.json();
-      const totalInvoices = countData.count;
-      const totalPages = Math.ceil(totalInvoices / limit);
-      const pageUrls = [];
-      for (let page = 0; page < totalPages; page++) {
-        const pageQueryParams = new URLSearchParams(queryParams);
-        pageQueryParams.set('offset', (page * limit).toString());
-        pageUrls.push(`${baseUrl}?${pageQueryParams.toString()}`);
-      }
-      const batchSize = 25;
-      for (let i = 0; i < pageUrls.length; i += batchSize) {
-        if (isCancelled) {
-          resultsContent.innerHTML = "❌ Fetching cancelled by user.";
-          break;
-        }
-        while (isPaused) {
-          // Always keep progress bar and results panel visible while paused
-          progressBar.classList.add('visible');
-          resultsPanel.classList.add('visible');
-          if (!resultsContent.innerHTML.includes('Paused...')) {
-            resultsContent.innerHTML += "<br><span style='color:#FFA500;font-weight:600;'>Paused...</span>";
-          }
-          await new Promise(r => setTimeout(r, 200));
-          if (isCancelled) {
-            resultsContent.innerHTML = "❌ Fetching cancelled by user.";
-            break;
-          }
-        }
-        // Remove 'Paused...' message if resuming
-        if (resultsContent.innerHTML.includes('Paused...')) {
-          resultsContent.innerHTML = resultsContent.innerHTML.replace(/<br><span style='color:#FFA500;font-weight:600;'>Paused\.\.\.<\/span>/g, '');
-        }
-        const batch = pageUrls.slice(i, i + batchSize);
-        const fetchPromises = batch.map(url =>
-          fetch(url, { headers: { "Accept": "application/json" }, credentials: "include" })
-            .then(res => res.json())
-            .then(data => data.results)
-        );
-        const batchResults = await Promise.all(fetchPromises);
-        batchResults.forEach(results => {
-          allInvoices = allInvoices.concat(results);
-        });
-        // Update progress bar and results after each batch
-        progressFill.style.width = `${Math.round(((i + batch.length) / pageUrls.length) * 100)}%`;
-        resultsPanel.classList.add('visible');
-        resultsPanel.style.display = '';
-        resultsContent.innerHTML = `Fetched: ${allInvoices.length} invoices...`;
-        // Force UI update
-        await new Promise(r => setTimeout(r, 0));
-      }
-      // Deduplicate invoices by ID after fetching all batches
-      const uniqueInvoicesMap = new Map();
-      allInvoices.forEach(inv => {
-        if (!uniqueInvoicesMap.has(inv.id)) {
-          uniqueInvoicesMap.set(inv.id, inv);
-        }
-      });
-      const uniqueInvoices = Array.from(uniqueInvoicesMap.values());
-      // Store for analytics/export
-      window.filteredInvoicesForExport = uniqueInvoices;
-
-      // --- Contact email/name lookup using id__in batching ---
-      const contactIds = [...new Set(uniqueInvoices.map(inv => inv.contact))];
-      const contactEmailMap = {};
-      const contactNameMap = {};
-      const contactBatchSize = 40;
-      for (let i = 0; i < contactIds.length; i += contactBatchSize) {
-        const batch = contactIds.slice(i, i + contactBatchSize);
-        const url = getApiUrl(`contacts/?id__in=${batch.join(",")}`);
-        try {
-          const res = await fetch(url, { headers: { "Accept": "application/json" }, credentials: "include" });
-          const data = await res.json();
-          data.results.forEach(contact => {
-            let email = contact.email && contact.email.trim();
-            if (!email && contact.persons && contact.persons.length > 0) {
-              email = contact.persons.find(p => p.email && p.email.trim() !== "")?.email.trim() || "";
+      
+      // Enhanced fetch function with retry logic for errors
+      async function fetchWithRetry(url, options = {}, maxRetries = 3, initialDelay = 500) {
+        let lastError;
+        let retries = 0;
+        
+        while (retries < maxRetries) {
+          try {
+            const response = await fetch(url, options);
+            
+            // Handle specific error codes
+            if (response.status === 503) {
+              retries++;
+              const delay = initialDelay * Math.pow(2, retries); // Exponential backoff
+              console.log(`🔄 Retry ${retries}/${maxRetries} for ${url} - Server returned 503, waiting ${delay}ms`);
+              resultsContent.innerHTML = `Server busy (503). Retrying in ${delay/1000}s... (${retries}/${maxRetries})`;
+              await new Promise(r => setTimeout(r, delay));
+              continue;
             }
-            contactEmailMap[contact.id] = email;
-            contactNameMap[contact.id] = contact.name || '';
-          });
-        } catch (e) {
-          console.warn("⚠️ Failed to fetch contact batch", e);
+            
+            if (response.status === 400) {
+              // Bad request - might be invalid parameters
+              console.warn(`⚠️ Bad request (400) for URL`, url);
+              throw new Error(`Bad request (400) - URL might be too long or have invalid parameters`);
+            }
+            
+            if (!response.ok) {
+              throw new Error(`API request failed with status ${response.status}`);
+            }
+            
+            try {
+              return await response.json();
+            } catch (jsonError) {
+              throw new Error(`Failed to parse response JSON: ${jsonError.message}`);
+            }
+          } catch (error) {
+            lastError = error;
+            if (retries >= maxRetries - 1) break;
+            
+            retries++;
+            const delay = initialDelay * Math.pow(2, retries);
+            console.log(`🔄 Retry ${retries}/${maxRetries} for ${url} - ${error.message}, waiting ${delay}ms`);
+            resultsContent.innerHTML = `Request error, retrying in ${delay/1000}s... (${retries}/${maxRetries})`;
+            await new Promise(r => setTimeout(r, delay));
+          }
         }
+        throw lastError || new Error(`Failed after ${maxRetries} retries`);
       }
-      // Store for export
-      window.lastContactEmailMap = contactEmailMap;
-      window.lastContactNameMap = contactNameMap;
-
-      // Only keep invoices whose contact has a non-empty email
-      const invoicesWithEmail = uniqueInvoices.filter(inv => {
-        const email = contactEmailMap[inv.contact];
-        return email && email !== "";
-      });
-      const invoicesWithoutEmail = uniqueInvoices.length - invoicesWithEmail.length;
-
-      // --- Apply email template to invoices missing it ---
+      
+      // --- Integrated approach: fetch, process contacts, and apply templates for each batch ---
+      let allInvoices = [];
+      let processedInvoices = [];
+      let contactEmailMap = {};
+      let contactNameMap = {};
       const currentEntityId = getEntityId();
       const templateId = currentEntityId === "1686" ? 10 : 8;
+      let totalTemplatesApplied = 0;
+      let totalTemplatesNeeded = 0;
+      let templateSuccessIds = new Set();
       
-      const invoicesToUpdate = invoicesWithEmail.filter(inv => !inv.email_template).map(inv => ({ id: inv.id, email_template: templateId }));
-      if (invoicesToUpdate.length > 0) {
-        resultsContent.innerHTML = `Applying email template to ${invoicesToUpdate.length} invoices...`;
-        try {
-          const patchRes = await fetch(getApiUrl("invoice-properties/update/"), {
-            method: "PATCH",
-            headers: {
-              "Content-Type": "application/json",
-              "Accept": "application/json",
-              "x-csrftoken": csrfToken
-            },
-            credentials: "include",
-            body: JSON.stringify(invoicesToUpdate)
-          });
-          if (!patchRes.ok) throw new Error("Failed to apply templates");
-          invoicesWithEmail.forEach(inv => { if (!inv.email_template) inv.email_template = templateId; });
-        } catch (e) {
-          resultsContent.innerHTML = "❌ Error applying email templates. See console for details.";
-          throw e;
+      // First, get the total count
+      try {
+        let countParams = new URLSearchParams(queryParams);
+        countParams.set('limit', '1');
+        const countData = await fetchWithRetry(`${baseUrl}?${countParams.toString()}`, { 
+          headers: { "Accept": "application/json" }, 
+          credentials: "include" 
+        });
+        
+        const totalInvoices = countData.count;
+        if (totalInvoices === 0) {
+          resultsContent.innerHTML = `<div style="line-height:1.7;">
+            <span style="font-weight:600; color:#131C26;">No invoices match your filters</span><br>
+            Try adjusting your search criteria.
+          </div>`;
+          showCheckButton();
+          return;
         }
-      }
-
-      // Calculate total for invoices ready to send
-      const totalReadyAmount = invoicesWithEmail.reduce((sum, inv) => sum + (inv.amount || 0), 0);
-
-      // Update UI
-      const countBadge = document.getElementById("invoice-count-badge");
-      if (countBadge) countBadge.textContent = `${invoicesWithEmail.length} Invoices`;
-      if (amountBadge) amountBadge.textContent = totalReadyAmount === 0 ? 'AED 0.00' : formatCurrency(totalReadyAmount);
-
-      let emailNote = "";
-      if (invoicesWithoutEmail > 0) {
-        emailNote = `<br><span style='color:#d9534f;font-weight:600;'>${invoicesWithoutEmail} invoices excluded (no contact email)</span>`;
-      }
-
-      resultsContent.innerHTML = `
-        <div style="line-height:1.7;">
-          <span style="font-weight:600; color:#131C26;">Fetched:</span> <b>${uniqueInvoices.length}</b><br>
-          <span style="font-weight:600; color:#131C26;">Excluded (No Email):</span> <b>${invoicesWithoutEmail}</b><br>
-          <span style="font-weight:600; color:#131C26;">Ready to Send:</span> <b>${invoicesWithEmail.length}</b><br>
-          <span style="font-weight:600; color:#131C26;">Total Amount:</span> <b>${formatCurrency(totalReadyAmount)}</b>
-          ${emailNote}
-        </div>
-      `;
-
-      // Show/hide buttons based on results
-      if (invoicesWithEmail.length > 0) {
-        showSendButton();
-      } else {
+        
+        const totalPages = Math.ceil(totalInvoices / limit);
+        resultsContent.innerHTML = `Found ${totalInvoices} matching invoices. Processing in batches...`;
+        
+        // We'll process in batches of up to 25 pages at a time
+        const batchSize = 25;
+        
+        // Create page URLs for each batch
+        const pageUrls = [];
+        for (let page = 0; page < totalPages; page++) {
+          const pageQueryParams = new URLSearchParams(queryParams);
+          pageQueryParams.set('offset', (page * limit).toString());
+          pageUrls.push(`${baseUrl}?${pageQueryParams.toString()}`);
+        }
+        
+        // Process each batch
+        for (let i = 0; i < pageUrls.length; i += batchSize) {
+          if (isCancelled) {
+            resultsContent.innerHTML = "❌ Processing cancelled by user.";
+            break;
+          }
+          
+          while (isPaused) {
+            // Handle pause state
+            progressBar.classList.add('visible');
+            resultsPanel.classList.add('visible');
+            if (!resultsContent.innerHTML.includes('Paused...')) {
+              resultsContent.innerHTML += "<br><span style='color:#FFA500;font-weight:600;'>Paused...</span>";
+            }
+            await new Promise(r => setTimeout(r, 200));
+            if (isCancelled) {
+              resultsContent.innerHTML = "❌ Processing cancelled by user.";
+              break;
+            }
+          }
+          
+          // Remove 'Paused...' message if resuming
+          if (resultsContent.innerHTML.includes('Paused...')) {
+            resultsContent.innerHTML = resultsContent.innerHTML.replace(/<br><span style='color:#FFA500;font-weight:600;'>Paused\.\.\.<\/span>/g, '');
+          }
+          
+          // STEP 1: Fetch this batch of invoice pages
+          const batch = pageUrls.slice(i, i + batchSize);
+          resultsContent.innerHTML = `Fetching invoices batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(pageUrls.length/batchSize)}...`;
+          
+          try {
+            const fetchPromises = batch.map(url => 
+              fetchWithRetry(url, { 
+                headers: { "Accept": "application/json" }, 
+                credentials: "include" 
+              }).then(data => data.results)
+            );
+            
+            const batchResults = await Promise.all(fetchPromises);
+            const batchInvoices = [];
+            batchResults.forEach(results => {
+              if (Array.isArray(results)) {
+                batchInvoices.push(...results);
+              }
+            });
+            
+            // Add to overall collection and deduplicate
+            allInvoices.push(...batchInvoices);
+            
+            // STEP 2: Extract unique contact IDs from this batch only
+            const batchContactIds = [...new Set(batchInvoices.map(inv => inv.contact))].filter(id => id);
+            
+            // STEP 3: Fetch contact information for this batch
+            if (batchContactIds.length > 0) {
+              resultsContent.innerHTML = `Fetching contact info for batch ${Math.floor(i/batchSize) + 1}...`;
+              
+              // Get contact info in larger batches for better efficiency
+              const contactBatchSize = 500;
+              for (let j = 0; j < batchContactIds.length; j += contactBatchSize) {
+                const contactsBatch = batchContactIds.slice(j, j + contactBatchSize);
+                const contactsUrl = getApiUrl(`contacts/?id__in=${contactsBatch.join(",")}`);
+                
+                try {
+                  const contactsData = await fetchWithRetry(contactsUrl, {
+                    headers: { "Accept": "application/json" },
+                    credentials: "include"
+                  });
+                  
+                  if (contactsData.results && Array.isArray(contactsData.results)) {
+                    contactsData.results.forEach(contact => {
+                      if (!contact || !contact.id) return;
+                      
+                      // Extract email from contact or persons
+                      let email = contact.email && contact.email.trim();
+                      if (!email && contact.persons && contact.persons.length > 0) {
+                        email = contact.persons.find(p => p.email && p.email.trim() !== "")?.email.trim() || "";
+                      }
+                      
+                      contactEmailMap[contact.id] = email || "";
+                      contactNameMap[contact.id] = contact.name || '';
+                    });
+                  }
+                } catch (contactError) {
+                  console.warn("⚠️ Failed to fetch contacts batch:", contactError);
+                }
+              }
+            }
+            
+            // STEP 4: Filter invoices with valid contact emails
+            const batchInvoicesWithEmail = batchInvoices.filter(inv => {
+              return inv.contact && contactEmailMap[inv.contact];
+            });
+            
+            // Add to processed invoices collection
+            processedInvoices.push(...batchInvoicesWithEmail);
+            
+            // STEP 5: Apply email templates to this batch if needed
+            if (batchInvoicesWithEmail.length > 0) {
+              resultsContent.innerHTML = `Applying templates for batch ${Math.floor(i/batchSize) + 1}...`;
+              
+                             const invoicesToUpdate = batchInvoicesWithEmail
+                 .filter(inv => !inv.email_template || inv.email_template !== templateId)
+                 .map(inv => ({ id: inv.id, email_template: templateId }));
+              
+              // Track total templates needed across all batches
+              totalTemplatesNeeded += invoicesToUpdate.length;
+              
+              if (invoicesToUpdate.length > 0) {
+                resultsContent.innerHTML = `Applying templates for batch ${Math.floor(i/batchSize) + 1} (${invoicesToUpdate.length} invoices)...`;
+                
+                try {
+                  // Update templates in sub-batches for reliability
+                  const templateBatchSize = 200;
+                  for (let k = 0; k < invoicesToUpdate.length; k += templateBatchSize) {
+                    const templateBatch = invoicesToUpdate.slice(k, k + templateBatchSize);
+                    
+                    const patchRes = await fetchWithRetry(getApiUrl("invoice-properties/update/"), {
+                      method: "PATCH",
+                      headers: {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                        "x-csrftoken": csrfToken
+                      },
+                      credentials: "include",
+                      body: JSON.stringify(templateBatch)
+                    });
+                    
+                    if (patchRes) {
+                      if (patchRes.invoice_ids && Array.isArray(patchRes.invoice_ids)) {
+                        // Track exactly which invoices were updated
+                        patchRes.invoice_ids.forEach(id => templateSuccessIds.add(id));
+                        totalTemplatesApplied += patchRes.invoice_ids.length;
+                        
+                        // Update the email_template property on successful invoices
+                        patchRes.invoice_ids.forEach(id => {
+                          const invIndex = batchInvoicesWithEmail.findIndex(inv => inv.id === id);
+                          if (invIndex >= 0) {
+                            batchInvoicesWithEmail[invIndex].email_template = templateId;
+                          }
+                        });
+                        
+                        // Log success rate for this sub-batch
+                        console.log(`Template batch ${Math.floor(i/batchSize) + 1}.${Math.floor(k/templateBatchSize) + 1}: ${patchRes.invoice_ids.length}/${templateBatch.length} applied`);
+                      } else {
+                        // If no invoice_ids property, assume all were successful
+                        totalTemplatesApplied += templateBatch.length;
+                        
+                        // Add all IDs to success tracking
+                        templateBatch.forEach(update => templateSuccessIds.add(update.id));
+                        
+                        // Update the email_template property on all invoices in batch
+                        templateBatch.forEach(update => {
+                          const invIndex = batchInvoicesWithEmail.findIndex(inv => inv.id === update.id);
+                          if (invIndex >= 0) {
+                            batchInvoicesWithEmail[invIndex].email_template = templateId;
+                          }
+                        });
+                      }
+                    }
+                  }
+                } catch (templateError) {
+                  console.error("⚠️ Template application error:", templateError);
+                }
+              }
+            }
+            
+            // STEP 6: Update progress
+            const processedPercent = Math.min(95, Math.round(((i + batch.length) / pageUrls.length) * 100));
+            progressFill.style.width = `${processedPercent}%`;
+            
+            const processedCount = processedInvoices.length;
+            const totalEmailMissing = allInvoices.length - processedInvoices.length;
+            
+                         // Calculate template completion percentage
+             const templateCompletionPercent = totalTemplatesNeeded > 0 
+               ? Math.round((totalTemplatesApplied / totalTemplatesNeeded) * 100) 
+               : 100;
+             
+             resultsContent.innerHTML = `
+               <div style="line-height:1.7;">
+                 Processed: <b>${allInvoices.length}/${totalInvoices}</b> invoices<br>
+                 With Email: <b>${processedCount}</b> | Missing Email: <b>${totalEmailMissing}</b><br>
+                 Templates: <b>${totalTemplatesApplied}/${totalTemplatesNeeded}</b> (${templateCompletionPercent}% complete)
+               </div>
+             `;
+          } catch (batchError) {
+            console.error(`Error processing batch ${Math.floor(i/batchSize) + 1}:`, batchError);
+            resultsContent.innerHTML += `<br><span style='color:#d9534f;font-weight:600;'>Error in batch ${Math.floor(i/batchSize) + 1}: ${batchError.message}</span>`;
+          }
+          
+          // Delay between batches to prevent overloading
+          await new Promise(r => setTimeout(r, 300));
+        }
+        
+        // Deduplicate the final invoices by ID
+        const uniqueInvoicesMap = new Map();
+        allInvoices.forEach(inv => {
+          if (!uniqueInvoicesMap.has(inv.id)) {
+            uniqueInvoicesMap.set(inv.id, inv);
+          }
+        });
+        const uniqueInvoices = Array.from(uniqueInvoicesMap.values());
+        
+        // Deduplicate processed invoices by ID
+        const uniqueProcessedMap = new Map();
+        processedInvoices.forEach(inv => {
+          if (!uniqueProcessedMap.has(inv.id)) {
+            uniqueProcessedMap.set(inv.id, inv);
+          }
+        });
+        const uniqueProcessedInvoices = Array.from(uniqueProcessedMap.values());
+        
+        // Store for analytics/export
+        window.filteredInvoicesForExport = uniqueInvoices;
+        window.lastContactEmailMap = contactEmailMap;
+        window.lastContactNameMap = contactNameMap;
+        
+        // Show final results
+        const invoicesWithEmail = uniqueProcessedInvoices;
+        const invoicesWithoutEmail = uniqueInvoices.length - invoicesWithEmail.length;
+        
+        // Check for any invoices missing templates
+        const invoicesMissingTemplate = invoicesWithEmail.filter(inv => 
+          !inv.email_template || inv.email_template !== templateId
+        ).length;
+        
+        // Calculate template completion status
+        const templateCompletionPercent = totalTemplatesNeeded > 0 
+          ? Math.round((templateSuccessIds.size / totalTemplatesNeeded) * 100) 
+          : 100;
+        
+        console.log(`🔍 Template application complete: ${templateSuccessIds.size}/${totalTemplatesNeeded} (${templateCompletionPercent}%)`);
+        
+        // Calculate total for invoices ready to send
+        const totalReadyAmount = invoicesWithEmail.reduce((sum, inv) => sum + (inv.amount || 0), 0);
+        
+        // Update UI
+        const countBadge = document.getElementById("invoice-count-badge");
+        if (countBadge) countBadge.textContent = `${invoicesWithEmail.length} Invoices`;
+        if (amountBadge) amountBadge.textContent = totalReadyAmount === 0 ? 'AED 0.00' : formatCurrency(totalReadyAmount);
+        
+        progressFill.style.width = "100%";
+        
+        let emailNote = "";
+        if (invoicesWithoutEmail > 0) {
+          emailNote = `<br><span style='color:#d9534f;font-weight:600;'>${invoicesWithoutEmail} invoices excluded (no contact email)</span>`;
+        }
+        
+        let templateNote = "";
+        if (invoicesMissingTemplate > 0) {
+          templateNote = `<br><span style='color:#FFA500;font-weight:600;'>${invoicesMissingTemplate} invoices are missing templates</span>`;
+        } else if (totalTemplatesNeeded > 0) {
+          templateNote = `<br><span style='color:#28a745;font-weight:600;'>✓ All templates successfully applied (${templateSuccessIds.size}/${totalTemplatesNeeded})</span>`;
+        }
+        
+        resultsContent.innerHTML = `
+          <div style="line-height:1.7;">
+            <span style="font-weight:600; color:#131C26;">Fetched:</span> <b>${uniqueInvoices.length}</b><br>
+            <span style="font-weight:600; color:#131C26;">Excluded (No Email):</span> <b>${invoicesWithoutEmail}</b><br>
+            <span style="font-weight:600; color:#131C26;">Ready to Send:</span> <b>${invoicesWithEmail.length}</b><br>
+            <span style="font-weight:600; color:#131C26;">Total Amount:</span> <b>${formatCurrency(totalReadyAmount)}</b>
+            ${emailNote}
+            ${templateNote}
+          </div>
+        `;
+        
+        // Show/hide buttons based on results
+        if (invoicesWithEmail.length > 0) {
+          showSendButton();
+        } else {
+          showCheckButton();
+        }
+      } catch (error) {
+        console.error("Count fetch error:", error);
+        resultsContent.innerHTML = `❌ Error getting invoices: ${error.message}`;
         showCheckButton();
+        return;
       }
+    } catch (error) {
+      console.error("Global error in invoice check:", error);
+      resultsContent.innerHTML = `
+        <div style="color:#d9534f;font-weight:600;">
+          ❌ Error: ${error.message || "Unknown error occurred"}
+        </div>
+        <button id="retry-check-btn" class="hc-btn" style="margin-top:10px;">Try Again</button>
+      `;
+      document.getElementById("retry-check-btn")?.addEventListener("click", () => {
+        document.getElementById("hc-check").click();
+      });
+      showCheckButton();
     } finally {
       document.getElementById('hc-loading-spinner').style.display = 'none'; // Hide spinner
     }
@@ -1482,26 +1709,87 @@ window.addEventListener('load', () => {
     const invoices = window.filteredInvoicesForExport || [];
     const contactEmailMap = window.lastContactEmailMap || {};
     const resultsContent = document.getElementById("hc-results-content");
+    
     if (!invoices.length) {
       if (resultsContent) resultsContent.innerHTML = "❌ No invoices to send. Please check invoices first.";
       return;
     }
+    
     const invoicesWithEmail = invoices.filter(inv => {
       const email = contactEmailMap[inv.contact];
       return email && email !== "";
     });
+    
     if (!invoicesWithEmail.length) {
       if (resultsContent) resultsContent.innerHTML = "❌ No invoices with contact emails to send.";
       return;
     }
+    
+    // Enhanced fetch with retry for send operations
+    async function sendWithRetry(invoiceIds, maxRetries = 3, initialDelay = 1000) {
+      let lastError;
+      let retries = 0;
+      
+      while (retries < maxRetries) {
+        try {
+          const response = await fetch(getApiUrl("invoices/send/"), {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+              "x-csrftoken": csrfToken
+            },
+            credentials: "include",
+            body: JSON.stringify({ invoice_ids: invoiceIds })
+          });
+          
+          // Handle 503 Service Unavailable specifically
+          if (response.status === 503) {
+            retries++;
+            const delay = initialDelay * Math.pow(1.5, retries); // Exponential backoff
+            console.log(`🔄 Retry ${retries}/${maxRetries} for sending - Server returned 503, waiting ${delay}ms`);
+            if (progressInfo) {
+              progressInfo.innerHTML += `<br><span style='color:#FFA500;'>Server busy (503). Retrying in ${delay/1000}s...</span>`;
+            }
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
+          
+          if (!response.ok) {
+            const errorText = await response.text().catch(() => "Unknown error");
+            throw new Error(`Send failed with status ${response.status}: ${errorText}`);
+          }
+          
+          return await response.json();
+        } catch (error) {
+          lastError = error;
+          console.error("Send error:", error);
+          
+          if (retries >= maxRetries - 1) break;
+          
+          retries++;
+          const delay = initialDelay * Math.pow(1.5, retries);
+          console.log(`🔄 Retry ${retries}/${maxRetries} for sending - ${error.message}, waiting ${delay}ms`);
+          if (progressInfo) {
+            progressInfo.innerHTML += `<br><span style='color:#FFA500;'>Error: ${error.message}. Retrying in ${delay/1000}s...</span>`;
+          }
+          await new Promise(r => setTimeout(r, delay));
+        }
+      }
+      
+      throw lastError || new Error(`Failed after ${maxRetries} retries`);
+    }
+    
     // UI progress setup
     const total = invoicesWithEmail.length;
-    const batchSendSize = 1000;
+    // Smaller batch size for better reliability
+    const batchSendSize = 150;
     const totalBatches = Math.ceil(total / batchSendSize);
     let totalQueued = 0;
     let totalFailed = 0;
     let currentBatch = 0;
     let sentResults = [];
+    
     // Progress bar
     let progressBar = document.getElementById('hc-send-progress-bar');
     if (!progressBar) {
@@ -1515,6 +1803,7 @@ window.addEventListener('load', () => {
       if (resultsContent) resultsContent.parentNode.insertBefore(progressBar, resultsContent);
     }
     const fill = document.getElementById('hc-send-progress-fill');
+    
     // Progress info
     let progressInfo = document.getElementById('hc-send-progress-info');
     if (!progressInfo) {
@@ -1523,94 +1812,196 @@ window.addEventListener('load', () => {
       progressInfo.style.cssText = 'margin-bottom:8px;font-size:15px;font-weight:500;';
       if (resultsContent) resultsContent.parentNode.insertBefore(progressInfo, progressBar);
     }
+    
     // Spinner
     const spinner = document.getElementById('hc-loading-spinner');
     if (spinner) spinner.style.display = 'flex';
+    
     // Live update function
     function updateProgressUI() {
-      if (progressInfo) progressInfo.innerHTML = `
-        Total: <b>${total}</b> | Batches: <b>${totalBatches}</b> | Current: <b>${currentBatch}/${totalBatches}</b><br>
-        Queued: <b>${totalQueued}</b> | Failed: <b>${totalFailed}</b>
-      `;
+      if (progressInfo) {
+        progressInfo.innerHTML = `
+          Total: <b>${total}</b> | Batches: <b>${totalBatches}</b> | Current: <b>${currentBatch}/${totalBatches}</b><br>
+          Queued: <b>${totalQueued}</b> | Failed: <b>${totalFailed}</b>
+        `;
+      }
       if (fill) fill.style.width = `${Math.round((totalQueued + totalFailed) / total * 100)}%`;
     }
     updateProgressUI();
+    
+    // Create a retry queue for failed batches
+    let retryQueue = [];
+    const maxRetryAttempts = 2;
+    
     // Sending loop
     for (let i = 0; i < invoicesWithEmail.length; i += batchSendSize) {
       currentBatch = Math.floor(i / batchSendSize) + 1;
       const batch = invoicesWithEmail.slice(i, i + batchSendSize);
       const batchIds = batch.map(inv => inv.id);
+      
       try {
-        const sendRes = await fetch(getApiUrl("invoices/send/"), {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "x-csrftoken": csrfToken
-          },
-          credentials: "include",
-          body: JSON.stringify({ invoice_ids: batchIds })
-        });
+        // Clear any old progress messages
+        updateProgressUI();
+        
+        // Use our retry-enabled send function
+        const sendData = await sendWithRetry(batchIds);
+        
         let batchSuccess = 0;
         let batchFail = 0;
-        if (sendRes.ok) {
-          const sendData = await sendRes.json();
-          batchSuccess = sendData.queued || batch.length;
+        
+        if (sendData && typeof sendData.queued === 'number') {
+          batchSuccess = sendData.queued;
           batchFail = batch.length - batchSuccess;
-          totalQueued += batchSuccess;
-          totalFailed += batchFail;
-          // Mark results for export
-          batch.forEach(inv => sentResults.push({
-            id: inv.id,
-            invoice_number: inv.invoice_number,
-            status: sendData.queued ? 'Sent' : 'Unknown',
-            contact: inv.contact,
-            amount: inv.amount,
-            result: batchSuccess ? 'Sent' : 'Failed'
-          }));
         } else {
-          totalFailed += batch.length;
-          batch.forEach(inv => sentResults.push({
+          // No clear success count, assume all succeeded
+          batchSuccess = batch.length;
+          batchFail = 0;
+        }
+        
+        totalQueued += batchSuccess;
+        totalFailed += batchFail;
+        
+        // Mark results for export with detailed information
+        batch.forEach((inv, idx) => {
+          const wasQueued = idx < batchSuccess; // Assume first N were queued if we know count
+          
+          sentResults.push({
             id: inv.id,
-            invoice_number: inv.invoice_number,
-            status: 'Failed',
+            invoice_number: inv.invoice_number || `#${inv.id}`,
+            status: wasQueued ? 'Sent' : 'Failed',
             contact: inv.contact,
+            contact_name: contactEmailMap[inv.contact] || '',
+            contact_email: window.lastContactEmailMap?.[inv.contact] || '',
             amount: inv.amount,
-            result: 'Failed'
-          }));
+            result: wasQueued ? 'Sent' : 'Failed',
+            batch: currentBatch,
+            timestamp: new Date().toISOString()
+          });
+        });
+        
+        // Add failed invoices to retry queue if any
+        if (batchFail > 0) {
+          // Only add the failed portion (assuming last N failed)
+          const failedInvoices = batch.slice(batchSuccess);
+          retryQueue.push({
+            invoices: failedInvoices,
+            attempts: 1
+          });
         }
       } catch (error) {
+        console.error(`Failed to send batch ${currentBatch}:`, error);
+        
         totalFailed += batch.length;
+        
+        // Mark all as failed for now (we'll retry later)
         batch.forEach(inv => sentResults.push({
           id: inv.id,
-          invoice_number: inv.invoice_number,
+          invoice_number: inv.invoice_number || `#${inv.id}`,
           status: 'Failed',
           contact: inv.contact,
+          contact_name: contactEmailMap[inv.contact] || '',
+          contact_email: window.lastContactEmailMap?.[inv.contact] || '',
           amount: inv.amount,
-          result: 'Failed'
+          result: 'Failed - ' + (error.message || 'Unknown error'),
+          batch: currentBatch,
+          timestamp: new Date().toISOString()
         }));
-        const resultsContent = document.getElementById("hc-results-content");
-        if (resultsContent) resultsContent.innerHTML = `<div style='color:#d9534f;font-weight:600;'>❌ Error sending some invoices. See console for details.</div>`;
+        
+        // Add to retry queue
+        retryQueue.push({
+          invoices: batch,
+          attempts: 1
+        });
+        
+        if (resultsContent) {
+          resultsContent.innerHTML = `<div style='color:#FFA500;font-weight:600;'>⚠️ Error sending batch ${currentBatch}. Will retry later.</div>`;
+        }
       }
+      
       updateProgressUI();
-      // Delay between batches
-      await new Promise(res => setTimeout(res, 500));
+      
+      // Delay between batches - vary based on batch size
+      await new Promise(res => setTimeout(res, Math.min(1000, batch.length * 5)));
     }
-    // Show results
-    if (resultsContent) resultsContent.innerHTML = `
-      <div style="line-height:1.7;">
-        <span style="font-weight:600; color:#131C26;">Queued to Send:</span> <b>${totalQueued}</b><br>
-        <span style="font-weight:600; color:#d9534f;">Failed to Queue:</span> <b>${totalFailed}</b><br>
-        <button id="hc-export-send-results" style="margin-top:12px;padding:8px 18px;background:#131C26;color:#fff;border:none;border-radius:12px;font-weight:600;cursor:pointer;font-size:14px;">Export Send Results CSV</button>
-        <div style='margin-top:10px;color:#28a745;font-weight:600;'>✅ Sending complete!</div>
-      </div>
-    `;
-    // Export CSV logic
+    
+    // Process retry queue if we have any failed batches
+    if (retryQueue.length > 0) {
+      if (resultsContent) {
+        resultsContent.innerHTML = `<div style='color:#FFA500;font-weight:600;'>Retrying ${retryQueue.length} failed batches...</div>`;
+      }
+      
+      for (let i = 0; i < retryQueue.length; i++) {
+        const retryItem = retryQueue[i];
+        
+        // Skip if max attempts reached
+        if (retryItem.attempts > maxRetryAttempts) continue;
+        
+        const retryBatch = retryItem.invoices;
+        const retryIds = retryBatch.map(inv => inv.id);
+        
+        try {
+          // Use smaller batches for retries
+          const subBatchSize = 25;
+          for (let j = 0; j < retryIds.length; j += subBatchSize) {
+            const subBatch = retryIds.slice(j, j + subBatchSize);
+            
+            if (progressInfo) {
+              progressInfo.innerHTML = `Retry attempt ${retryItem.attempts}/${maxRetryAttempts} for ${subBatch.length} invoices...`;
+            }
+            
+            const sendData = await sendWithRetry(subBatch, 2); // Less retries for sub-batches
+            
+            // Update counters and results
+            if (sendData && typeof sendData.queued === 'number' && sendData.queued > 0) {
+              // Some invoices were queued successfully in this retry
+              totalFailed -= sendData.queued;
+              totalQueued += sendData.queued;
+              
+              // Update sentResults for the successfully retried invoices
+              for (let k = 0; k < subBatch.length && k < sendData.queued; k++) {
+                const retryId = subBatch[k];
+                const resultIndex = sentResults.findIndex(r => r.id === retryId);
+                if (resultIndex >= 0) {
+                  sentResults[resultIndex].status = 'Sent (Retry)';
+                  sentResults[resultIndex].result = 'Sent (Retry)';
+                }
+              }
+            }
+            
+            // Small delay between sub-batches
+            await new Promise(res => setTimeout(res, 500));
+          }
+        } catch (error) {
+          console.error(`Failed retry for batch:`, error);
+          if (progressInfo) {
+            progressInfo.innerHTML += `<br><span style='color:#d9534f;'>Retry failed: ${error.message}</span>`;
+          }
+        }
+      }
+    }
+    
+    // Show final results
+    if (resultsContent) {
+      let sendingStatus = totalFailed > 0 ? 
+        `<div style='margin-top:10px;color:#FFA500;font-weight:600;'>⚠️ Sending completed with some failures</div>` :
+        `<div style='margin-top:10px;color:#28a745;font-weight:600;'>✅ Sending complete!</div>`;
+        
+      resultsContent.innerHTML = `
+        <div style="line-height:1.7;">
+          <span style="font-weight:600; color:#131C26;">Queued to Send:</span> <b>${totalQueued}</b><br>
+          <span style="font-weight:600; color:#d9534f;">Failed to Queue:</span> <b>${totalFailed}</b><br>
+          <button id="hc-export-send-results" style="margin-top:12px;padding:8px 18px;background:#131C26;color:#fff;border:none;border-radius:12px;font-weight:600;cursor:pointer;font-size:14px;">Export Send Results CSV</button>
+          ${sendingStatus}
+        </div>
+      `;
+    }
+    
+    // Export CSV logic with enhanced fields
     const exportBtn = document.getElementById('hc-export-send-results');
     if (exportBtn) {
       exportBtn.onclick = function() {
         if (!sentResults.length) return;
-        const header = ['id','invoice_number','status','contact','amount','result'];
+        const header = ['id','invoice_number','status','contact','contact_name','contact_email','amount','result','batch','timestamp'];
         const csvRows = [header.join(',')];
         sentResults.forEach(row => {
           csvRows.push(header.map(key => '"' + String(row[key] ?? '').replace(/"/g, '""') + '"').join(','));
@@ -1626,8 +2017,10 @@ window.addEventListener('load', () => {
         setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
       };
     }
+    
     // Hide spinner
     if (spinner) spinner.style.display = 'none';
+    
     // Update analytics if possible
     if (typeof renderAnalytics === 'function') renderAnalytics();
   }
